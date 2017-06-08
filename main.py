@@ -34,15 +34,17 @@ parser.add_argument('--cuda'  , action='store_true', help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
-parser.add_argument('--clamp_lower', type=float, default=-0.01)
-parser.add_argument('--clamp_upper', type=float, default=0.01)
+parser.add_argument('--wdecay', type=float, default=0.000, help='wdecay value for Phi')
 parser.add_argument('--Diters', type=int, default=5, help='number of D iters per each G iter')
+parser.add_argument('--hiDiterStart'  , action='store_true', help='do many D iters at start')
 parser.add_argument('--noBN', action='store_true', help='use batchnorm or not (only for DCGAN)')
 parser.add_argument('--mlp_G', action='store_true', help='use MLP for G')
 parser.add_argument('--mlp_D', action='store_true', help='use MLP for D')
-parser.add_argument('--n_extra_layers', type=int, default=0, help='Number of extra layers on gen and disc')
+parser.add_argument('--G_extra_layers', type=int, default=0, help='Number of extra layers on gen and disc')
+parser.add_argument('--D_extra_layers', type=int, default=0, help='Number of extra layers on gen and disc')
 parser.add_argument('--experiment', default=None, help='Where to store samples and models')
 parser.add_argument('--adam', action='store_true', help='Whether to use adam (default is rmsprop)')
+parser.add_argument('--rho', type=float, default=1e-6, help='Weight on the penalty term for (sigmas -1)**2')
 opt = parser.parse_args()
 print(opt)
 
@@ -60,7 +62,7 @@ cudnn.benchmark = True
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
-if opt.dataset in ['imagenet', 'folder', 'lfw']:
+if opt.dataset in ['imagenet', 'folder', 'lfw', 'celeba']:
     # folder dataset
     dataset = dset.ImageFolder(root=opt.dataroot,
                                transform=transforms.Compose([
@@ -94,7 +96,6 @@ nz = int(opt.nz)
 ngf = int(opt.ngf)
 ndf = int(opt.ndf)
 nc = int(opt.nc)
-n_extra_layers = int(opt.n_extra_layers)
 
 # custom weights initialization called on netG and netD
 def weights_init(m):
@@ -106,11 +107,11 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 if opt.noBN:
-    netG = dcgan.DCGAN_G_nobn(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
+    netG = dcgan.DCGAN_G_nobn(opt.imageSize, nz, nc, ngf, ngpu, opt.G_extra_layers)
 elif opt.mlp_G:
     netG = mlp.MLP_G(opt.imageSize, nz, nc, ngf, ngpu)
 else:
-    netG = dcgan.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
+    netG = dcgan.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, opt.G_extra_layers)
 
 netG.apply(weights_init)
 if opt.netG != '': # load checkpoint if needed
@@ -120,7 +121,7 @@ print(netG)
 if opt.mlp_D:
     netD = mlp.MLP_D(opt.imageSize, nz, nc, ndf, ngpu)
 else:
-    netD = dcgan.DCGAN_D(opt.imageSize, nz, nc, ndf, ngpu, n_extra_layers)
+    netD = dcgan.DCGAN_D(opt.imageSize, nz, nc, ndf, ngpu, opt.D_extra_layers)
     netD.apply(weights_init)
 
 if opt.netD != '':
@@ -132,6 +133,7 @@ noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
 one = torch.FloatTensor([1])
 mone = one * -1
+alpha = torch.FloatTensor([0]) # lagrange multipliers
 
 if opt.cuda:
     netD.cuda()
@@ -139,14 +141,16 @@ if opt.cuda:
     input = input.cuda()
     one, mone = one.cuda(), mone.cuda()
     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
+    alpha = alpha.cuda()
+alpha = Variable(alpha, requires_grad=True)
 
 # setup optimizer
 if opt.adam:
-    optimizerD = optim.Adam(netD.parameters(), lr=opt.lrD, betas=(opt.beta1, 0.999))
-    optimizerG = optim.Adam(netG.parameters(), lr=opt.lrG, betas=(opt.beta1, 0.999))
+    optimizerD = optim.Adam(netD.parameters(), lr=opt.lrD, betas=(opt.beta1, 0.999), weight_decay=opt.wdecay)
+    optimizerG = optim.Adam(netG.parameters(), lr=opt.lrG, betas=(opt.beta1, 0.999), weight_decay=opt.wdecay)
 else:
-    optimizerD = optim.RMSprop(netD.parameters(), lr = opt.lrD)
-    optimizerG = optim.RMSprop(netG.parameters(), lr = opt.lrG)
+    optimizerD = optim.RMSprop(netD.parameters(), lr = opt.lrD, weight_decay=opt.wdecay)
+    optimizerG = optim.RMSprop(netG.parameters(), lr = opt.lrG, weight_decay=opt.wdecay)
 
 gen_iterations = 0
 for epoch in range(opt.niter):
@@ -160,17 +164,13 @@ for epoch in range(opt.niter):
             p.requires_grad = True # they are set to False below in netG update
 
         # train the discriminator Diters times
-        if gen_iterations < 25 or gen_iterations % 500 == 0:
+        if opt.hiDiterStart and (gen_iterations < 25 or gen_iterations % 500 == 0):
             Diters = 100
         else:
             Diters = opt.Diters
         j = 0
         while j < Diters and i < len(dataloader):
             j += 1
-
-            # clamp parameters to a cube
-            for p in netD.parameters():
-                p.data.clamp_(opt.clamp_lower, opt.clamp_upper)
 
             data = data_iter.next()
             i += 1
@@ -185,18 +185,28 @@ for epoch in range(opt.niter):
             input.resize_as_(real_cpu).copy_(real_cpu)
             inputv = Variable(input)
 
-            errD_real = netD(inputv)
-            errD_real.backward(one)
+            vphi_real = netD(inputv)
 
             # train with fake
             noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
             noisev = Variable(noise, volatile = True) # totally freeze netG
             fake = Variable(netG(noisev).data)
             inputv = fake
-            errD_fake = netD(inputv)
-            errD_fake.backward(mone)
-            errD = errD_real - errD_fake
+
+            vphi_fake = netD(inputv)
+            # NOTE here f = <v,phi>   , but with modified f the below two lines are the
+            # only ones that need change. E_P and E_Q refer to Expectation over real and fake.
+            E_P_f,  E_Q_f  = vphi_real.mean(), vphi_fake.mean()
+            E_P_f2, E_Q_f2 = (vphi_real**2).mean(), (vphi_fake**2).mean()
+            constraint = (1 - (0.5*E_P_f2 + 0.5*E_Q_f2))
+            # See Equation (9)
+            obj_D = E_P_f - E_Q_f + alpha * constraint - opt.rho/2 * constraint**2
+            # max_w min_alpha obj_D. Compute negative gradients, apply updates with negative sign.
+            obj_D.backward(mone)
             optimizerD.step()
+            # artisanal sgd. We minimze alpha so a <- a + lr * (-grad)
+            alpha.data += opt.rho * alpha.grad.data
+            alpha.grad.data.zero_()
 
         ############################
         # (2) Update G network
@@ -209,14 +219,20 @@ for epoch in range(opt.niter):
         noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
         noisev = Variable(noise)
         fake = netG(noisev)
-        errG = netD(fake)
-        errG.backward(one)
+        vphi_fake = netD(fake)
+        obj_G = -vphi_fake.mean() # Just minimize mean difference
+        obj_G.backward() # G: min_theta
         optimizerG.step()
         gen_iterations += 1
 
-        print('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f'
+        IPM_enum  = E_P_f.data[0]  - E_Q_f.data[0]
+        IPM_denom = (0.5*E_P_f2.data[0] + 0.5*E_Q_f2.data[0]) ** 0.5
+        IPM_ratio = IPM_enum / IPM_denom
+        print(('[%d/%d][%d/%d][%d] IPM_enum: %.4f IPM_denom: %.4f IPM_ratio: %.4f '
+               'E_P_f: %.4f E_Q_f: %.4f E_P_(f^2): %.4f E_Q_(f^2): %.4f')
             % (epoch, opt.niter, i, len(dataloader), gen_iterations,
-            errD.data[0], errG.data[0], errD_real.data[0], errD_fake.data[0]))
+            IPM_enum, IPM_denom, IPM_ratio,
+            E_P_f.data[0], E_Q_f.data[0], E_P_f2.data[0], E_Q_f2.data[0]))
         if gen_iterations % 500 == 0:
             real_cpu = real_cpu.mul(0.5).add(0.5)
             vutils.save_image(real_cpu, '{0}/real_samples.png'.format(opt.experiment))

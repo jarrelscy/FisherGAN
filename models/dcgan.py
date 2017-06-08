@@ -48,9 +48,7 @@ class DCGAN_D(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else: 
             output = self.main(input)
-            
-        output = output.mean(0)
-        return output.view(1)
+        return output.view(-1)
 
 class DCGAN_G(nn.Module):
     def __init__(self, isize, nz, nc, ngf, ngpu, n_extra_layers=0):
@@ -148,9 +146,7 @@ class DCGAN_D_nobn(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else: 
             output = self.main(input)
-            
-        output = output.mean(0)
-        return output.view(1)
+        return output.view(-1)
 
 class DCGAN_G_nobn(nn.Module):
     def __init__(self, isize, nz, nc, ngf, ngpu, n_extra_layers=0):
