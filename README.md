@@ -3,7 +3,7 @@ Fisher GAN
 
 Code accompanying the paper ["Fisher GAN"](https://arxiv.org/abs/1705.09675) [arxiv:1705.09675]
 
-Note: This code was obtained by running ```git apply diff.txt``` using diff found in arXiv LaTeX source of arxiv:1705.09675
+Note: This code was obtained by running ```git apply diff.txt``` on [martinarjovsky/WassersteinGAN] (https://github.com/martinarjovsky/WassersteinGAN) using diff found in arXiv LaTeX source of arxiv:1705.09675
 
 ## A few notes
 
