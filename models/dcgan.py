@@ -193,3 +193,94 @@ class DCGAN_G_nobn(nn.Module):
         else: 
             output = self.main(input)
         return output 
+##################################################################################
+class DCGAN_D_nobn_selu(nn.Module):
+    def __init__(self, isize, nz, nc, ndf, ngpu, n_extra_layers=0):
+        super(DCGAN_D_nobn_selu, self).__init__()
+        self.ngpu = ngpu
+        assert isize % 16 == 0, "isize has to be a multiple of 16"
+
+        main = nn.Sequential()
+        # input is nc x isize x isize
+        # input is nc x isize x isize
+        main.add_module('initial.conv.{0}-{1}'.format(nc, ndf),
+                        nn.Conv2d(nc, ndf, 4, 2, 1, bias=False))
+        main.add_module('initial.selu.{0}'.format(ndf),
+                        nn.SELU(inplace=True))
+        csize, cndf = isize / 2, ndf
+
+        # Extra layers
+        for t in range(n_extra_layers):
+            main.add_module('extra-layers-{0}.{1}.conv'.format(t, cndf),
+                            nn.Conv2d(cndf, cndf, 3, 1, 1, bias=False))
+            main.add_module('extra-layers-{0}.{1}.selu'.format(t, cndf),
+                            nn.SELU(inplace=True))
+
+        while csize > 4:
+            in_feat = cndf
+            out_feat = cndf * 2
+            main.add_module('pyramid.{0}-{1}.conv'.format(in_feat, out_feat),
+                            nn.Conv2d(in_feat, out_feat, 4, 2, 1, bias=False))
+            main.add_module('pyramid.{0}.selu'.format(out_feat),
+                            nn.SELU(inplace=True))
+            cndf = cndf * 2
+            csize = csize / 2
+
+        # state size. K x 4 x 4
+        main.add_module('final.{0}-{1}.conv'.format(cndf, 1),
+                        nn.Conv2d(cndf, 1, 4, 1, 0, bias=False))
+        self.main = main
+
+
+    def forward(self, input):
+        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
+        else: 
+            output = self.main(input)
+        return output.view(-1)
+
+class DCGAN_G_nobn_selu(nn.Module):
+    def __init__(self, isize, nz, nc, ngf, ngpu, n_extra_layers=0):
+        super(DCGAN_G_nobn_selu, self).__init__()
+        self.ngpu = ngpu
+        assert isize % 16 == 0, "isize has to be a multiple of 16"
+
+        cngf, tisize = ngf//2, 4
+        while tisize != isize:
+            cngf = cngf * 2
+            tisize = tisize * 2
+
+        main = nn.Sequential()
+        main.add_module('initial.{0}-{1}.convt'.format(nz, cngf),
+                        nn.ConvTranspose2d(nz, cngf, 4, 1, 0, bias=False))
+        main.add_module('initial.{0}.selu'.format(cngf),
+                        nn.SELU(inplace=True))
+
+        csize, cndf = 4, cngf
+        while csize < isize//2:
+            main.add_module('pyramid.{0}-{1}.convt'.format(cngf, cngf//2),
+                            nn.ConvTranspose2d(cngf, cngf//2, 4, 2, 1, bias=False))
+            main.add_module('pyramid.{0}.selu'.format(cngf//2),
+                            nn.SELU(inplace=True))
+            cngf = cngf // 2
+            csize = csize * 2
+
+        # Extra layers
+        for t in range(n_extra_layers):
+            main.add_module('extra-layers-{0}.{1}.conv'.format(t, cngf),
+                            nn.Conv2d(cngf, cngf, 3, 1, 1, bias=False))
+            main.add_module('extra-layers-{0}.{1}.selu'.format(t, cngf),
+                            nn.SELU(inplace=True))
+
+        main.add_module('final.{0}-{1}.convt'.format(cngf, nc),
+                        nn.ConvTranspose2d(cngf, nc, 4, 2, 1, bias=False))
+        main.add_module('final.{0}.tanh'.format(nc),
+                        nn.Tanh())
+        self.main = main
+
+    def forward(self, input):
+        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.main, input,  range(self.ngpu))
+        else: 
+            output = self.main(input)
+        return output 

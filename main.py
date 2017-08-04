@@ -11,26 +11,27 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
+from utils import RGBToGray, plot_img, plot_scalar, save_images, to_device
 import os
-
+import numpy as np
 import models.dcgan as dcgan
 import models.mlp as mlp
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw ')
+parser.add_argument('--dataset', default='folder', required=False, help='cifar10 | lsun | imagenet | folder | lfw ')
 parser.add_argument('--dataroot', required=True, help='path to dataset')
-parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
+parser.add_argument('--workers', type=int, help='number of data loading workers', default=10)
 parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
-parser.add_argument('--nc', type=int, default=3, help='input image channels')
-parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
+parser.add_argument('--nc', type=int, default=1, help='input image channels')
+parser.add_argument('--nz', type=int, default=64, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
-parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
+parser.add_argument('--niter', type=int, default=99999999999999, help='number of epochs to train for')
 parser.add_argument('--lrD', type=float, default=0.00005, help='learning rate for Critic, default=0.00005')
 parser.add_argument('--lrG', type=float, default=0.00005, help='learning rate for Generator, default=0.00005')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
-parser.add_argument('--cuda'  , action='store_true', help='enables cuda')
+parser.add_argument('--cuda'  , default=True, action='store_true', help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
@@ -45,18 +46,21 @@ parser.add_argument('--D_extra_layers', type=int, default=0, help='Number of ext
 parser.add_argument('--experiment', default=None, help='Where to store samples and models')
 parser.add_argument('--adam', action='store_true', help='Whether to use adam (default is rmsprop)')
 parser.add_argument('--rho', type=float, default=1e-6, help='Weight on the penalty term for (sigmas -1)**2')
+parser.add_argument('--display_freq', type=int, default= 100, help='plot the results every {} batches')
+parser.add_argument('--median_filter_length', type=int, default=200, help='number of losses to put median filter over.')
+parser.add_argument('--gpunum'  , type=int, default=0, help='which of GPUs to use')        
 opt = parser.parse_args()
 print(opt)
 
 if opt.experiment is None:
     opt.experiment = 'samples'
 os.system('mkdir {0}'.format(opt.experiment))
-
+torch.cuda.set_device(opt.gpunum)
 opt.manualSeed = random.randint(1, 10000) # fix seed
 print("Random Seed: ", opt.manualSeed)
 random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
-
+mode_name = 'FisherGAN'
 cudnn.benchmark = True
 
 if torch.cuda.is_available() and not opt.cuda:
@@ -66,10 +70,11 @@ if opt.dataset in ['imagenet', 'folder', 'lfw', 'celeba']:
     # folder dataset
     dataset = dset.ImageFolder(root=opt.dataroot,
                                transform=transforms.Compose([
-                                   transforms.Scale(opt.imageSize),
-                                   transforms.CenterCrop(opt.imageSize),
+                                  transforms.Scale(opt.imageSize),
+                                   transforms.RandomCrop(opt.imageSize, opt.imageSize//8),
                                    transforms.ToTensor(),
-                                   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                                   RGBToGray(),
+                                   transforms.Normalize((0.5,), (0.5,)), 
                                ]))
 elif opt.dataset == 'lsun':
     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
@@ -122,7 +127,7 @@ if opt.mlp_D:
     netD = mlp.MLP_D(opt.imageSize, nz, nc, ndf, ngpu)
 else:
     netD = dcgan.DCGAN_D(opt.imageSize, nz, nc, ndf, ngpu, opt.D_extra_layers)
-    netD.apply(weights_init)
+netD.apply(weights_init)
 
 if opt.netD != '':
     netD.load_state_dict(torch.load(opt.netD))
@@ -153,6 +158,12 @@ else:
     optimizerG = optim.RMSprop(netG.parameters(), lr = opt.lrG, weight_decay=opt.wdecay)
 
 gen_iterations = 0
+d_loss_plot = plot_scalar(name = "d_loss", env= mode_name, rate = opt.display_freq)
+g_loss_plot = plot_scalar(name = "g_loss", env= mode_name, rate = opt.display_freq)
+d_median_loss_plot = plot_scalar(name = "d_median_loss", env= mode_name, rate = opt.display_freq)
+g_median_loss_plot = plot_scalar(name = "g_median_loss", env= mode_name, rate = opt.display_freq)
+g_losses = []
+d_losses = []
 for epoch in range(opt.niter):
     data_iter = iter(dataloader)
     i = 0
@@ -202,6 +213,11 @@ for epoch in range(opt.niter):
             # See Equation (9)
             obj_D = E_P_f - E_Q_f + alpha * constraint - opt.rho/2 * constraint**2
             # max_w min_alpha obj_D. Compute negative gradients, apply updates with negative sign.
+            d_losses.append(obj_D.cpu().data.numpy().mean())
+            
+            d_loss_plot.plot(obj_D.cpu().data.numpy().mean())
+            d_median_loss_plot.plot(np.median(d_losses[-opt.median_filter_length:]))
+                
             obj_D.backward(mone)
             optimizerD.step()
             # artisanal sgd. We minimze alpha so a <- a + lr * (-grad)
@@ -221,6 +237,11 @@ for epoch in range(opt.niter):
         fake = netG(noisev)
         vphi_fake = netD(fake)
         obj_G = -vphi_fake.mean() # Just minimize mean difference
+        g_losses.append(obj_G.cpu().data.numpy().mean())
+        
+        g_loss_plot.plot(obj_G.cpu().data.numpy().mean())
+        g_median_loss_plot.plot(np.median(g_losses[-opt.median_filter_length:]))
+            
         obj_G.backward() # G: min_theta
         optimizerG.step()
         gen_iterations += 1
@@ -228,6 +249,19 @@ for epoch in range(opt.niter):
         IPM_enum  = E_P_f.data[0]  - E_Q_f.data[0]
         IPM_denom = (0.5*E_P_f2.data[0] + 0.5*E_Q_f2.data[0]) ** 0.5
         IPM_ratio = IPM_enum / IPM_denom
+        
+        if gen_iterations % opt.display_freq == 1:
+            imgs = save_images(
+                            fake,
+                            os.path.join(opt.experiment,'samples_{}.png'.format(gen_iterations) ),save=False,dim_ordering = 'th'
+                            )
+            print(fake.size())
+            plot_img(X=imgs, win='sample_img', env=mode_name)
+
+            true_imgs = save_images(real_cpu, save=False,dim_ordering = 'th')
+            plot_img(X=true_imgs, win='real_img', env=mode_name)
+                
+                
         print(('[%d/%d][%d/%d][%d] IPM_enum: %.4f IPM_denom: %.4f IPM_ratio: %.4f '
                'E_P_f: %.4f E_Q_f: %.4f E_P_(f^2): %.4f E_Q_(f^2): %.4f')
             % (epoch, opt.niter, i, len(dataloader), gen_iterations,
